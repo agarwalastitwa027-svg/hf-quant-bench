@@ -1,0 +1,70 @@
+# hf-quant-bench dependencies
+#
+# Install torch FIRST and separately, with the CUDA index URL — see README for
+# the exact command and why (Blackwell/sm_120 needs a recent enough build).
+# Everything below assumes torch is already installed.
+#
+# Grouped by what each dependency is for, so a partial install still lets
+# `--list` show you exactly which targets you unlocked.
+
+# --- core (always required) ---
+transformers>=4.46
+accelerate>=0.34
+safetensors>=0.4
+huggingface_hub>=0.25
+datasets>=2.20          # calibration data for GPTQ/AWQ
+pyyaml>=6.0
+sentencepiece>=0.2       # tokenizers for many HF models
+
+# --- bitsandbytes NF4 / INT8 target (GPU, Blackwell-sensitive) ---
+# bitsandbytes>=0.44 — verify with:
+#   python -c "import bitsandbytes as bnb; print(bnb.__version__)"
+# Older builds may install fine but produce silently wrong results or crash
+# on an sm_120 GPU. If in doubt, build from source per the bitsandbytes repo's
+# CUDA 12.4+/Blackwell instructions.
+bitsandbytes>=0.44
+
+# --- GPTQ target (GPU) ---
+optimum>=1.23
+gptqmodel>=1.4            # actively maintained; preferred over auto-gptq
+
+# --- AWQ target (GPU) ---
+# autoawq was archived upstream in 2025 — install is attempted but expected
+# to be flaky on newer torch/CUDA. llmcompressor is the maintained fallback
+# this project actually exercises if autoawq fails.
+# autoawq
+llmcompressor>=0.3
+
+# --- torchao int4 target (GPU) ---
+torchao>=0.6
+
+# --- GGUF target (CPU; needs a separately built llama.cpp, see README) ---
+gguf>=0.10                # python package the convert script imports
+llama-cpp-python>=0.3     # used only by the BENCHMARK loader, not the converter
+
+# --- ONNX targets (CPU) ---
+optimum[onnxruntime]>=1.23
+onnx>=1.16
+onnxruntime>=1.19
+
+# --- OpenVINO targets (optional, CPU/iGPU/NPU, runtime-detected) ---
+# Uncomment if you want OpenVINO IR export. Not required for the main WSL flow.
+# openvino>=2024.4
+# optimum[openvino]>=1.23
+
+# --- Qualcomm AI Hub target (optional, cloud, off by default) ---
+# qai-hub
+
+# --- benchmark harness ---
+# No cloud LLM API client here on purpose: path_optimization and
+# answer_completeness are deterministic, rule-based metrics computed from
+# data this project already has exactly (see bench/metrics_rule.py) -- there
+# is no LLM-as-a-judge in the primary metrics, and no ANTHROPIC_API_KEY or
+# equivalent is ever read. The optional --local-judge flag (off by default)
+# scores a separate, supplementary pair of columns using a local GGUF model
+# through llama-cpp-python, which is already required above for the gguf
+# conversion target -- no new dependency needed for it.
+psutil>=6.0
+
+# --- dev ---
+pytest>=8.0

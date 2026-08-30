@@ -1,0 +1,1266 @@
+# Agentic tool-calling test suite.
+#
+# Each case:
+#   id                  unique string
+#   category            one of: single_simple, single_nested, multi_step,
+#                        no_tool, distractor, clarify, long_context
+#   prompt              the user's message (string)
+#   available_tools     list of tool names exposed to the model this turn
+#                        (from bench/tools.py TOOLS registry)
+#   expected_behavior   "tool_call" | "no_tool" | "clarify"
+#   expected_trajectory list of {tool, arguments} the model SHOULD call, in
+#                        order (empty for no_tool / clarify cases). Argument
+#                        values are matched exactly for scalars; grader does
+#                        light normalization (str<->number, case-insensitive
+#                        strings) — see bench/metrics_rule.py.
+#   optimal_steps       the minimum number of trajectory steps a fully
+#                        correct model needs: len(expected_trajectory) + 1
+#                        (one step per tool call, plus the final answering
+#                        turn), or 1 for no_tool/clarify cases. Drives the
+#                        deterministic path_optimization metric:
+#                        clamp(optimal_steps / actual_steps, 0, 1), scored 0
+#                        instead if the trajectory hit the step cap without
+#                        terminating (see `timeout_rate` in results.csv).
+#   required_facts      concrete values that MUST appear (substring match
+#                        for text, tolerance-based numeric match for
+#                        numbers -- see bench/metrics_rule.py) in the
+#                        model's final answer for it to be complete. Always
+#                        derived from the REAL, deterministic mock tool
+#                        output for expected_trajectory's last call (ground
+#                        truth computed directly from bench/tools.py, not
+#                        guessed) -- e.g. get_weather -> [temperature,
+#                        location], calculator -> [result]. Empty for
+#                        no_tool/clarify cases (nothing to check) and for a
+#                        few specific cases where no safe deterministic
+#                        literal exists (a zero-event calendar day has no
+#                        single string every correct paraphrase of "you're
+#                        free" would contain) -- see the project writeup for
+#                        the full list and why. Drives the deterministic
+#                        answer_completeness metric: matched / total,
+#                        computed only over cases with a non-empty list (see
+#                        metrics_rule.py for how no_tool/clarify cases are
+#                        scored and excluded from that average instead).
+#   judge_notes         free-text context for the OPTIONAL --local-judge
+#                        pass only (off by default -- see README). Not used
+#                        by the primary, always-on rule-based metrics above.
+#   max_steps           optional override of the global step cap.
+
+- id: simple_weather_1
+  category: single_simple
+  prompt: "What's the weather like in Tokyo right now?"
+  available_tools: [get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Tokyo"}
+  optimal_steps: 2
+  required_facts: ['-4.3', 'Tokyo']
+  judge_notes: "One tool call, then a natural-language answer stating the returned temperature and conditions."
+
+- id: simple_weather_2
+  category: single_simple
+  prompt: "Is it cold in Reykjavik today?"
+  available_tools: [get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Reykjavik"}
+  optimal_steps: 2
+  required_facts: ['34.3', 'Reykjavik']
+  judge_notes: "Answer should interpret the returned temperature as cold/mild/hot, not just repeat the number."
+
+- id: simple_calendar_1
+  category: single_simple
+  prompt: "What do I have on my calendar for 2026-09-01?"
+  available_tools: [get_calendar_events]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-09-01"}
+  optimal_steps: 2
+  required_facts: ['09:00']
+  judge_notes: "Should summarize the returned events (or clearly state there are none)."
+
+- id: simple_search_1
+  category: single_simple
+  prompt: "Search the web for the tallest mountain in the world."
+  available_tools: [web_search]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "tallest mountain in the world"}
+  optimal_steps: 2
+  required_facts: ['Mount Everest']
+  judge_notes: "Should summarize a search result, not just dump raw JSON."
+
+- id: simple_calc_1
+  category: single_simple
+  prompt: "What is 482 plus 317?"
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "482 + 317"}
+  optimal_steps: 2
+  required_facts: ['799']
+  judge_notes: "Final answer should state 799."
+
+- id: simple_readfile_1
+  category: single_simple
+  prompt: "Read the file at /notes/todo.txt and tell me what's on it."
+  available_tools: [read_file]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/notes/todo.txt"}
+  optimal_steps: 2
+  required_facts: ['Buy milk']
+  judge_notes: "Should list the todo items from the file content."
+
+- id: nested_weather_unit
+  category: single_nested
+  prompt: "What's the temperature in Chicago in Fahrenheit?"
+  available_tools: [get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Chicago", unit: "fahrenheit"}
+  optimal_steps: 2
+  required_facts: ['86.0', 'Chicago']
+  judge_notes: "Correct handling of the enum-typed 'unit' parameter is the point of this test."
+
+- id: nested_calc_parens
+  category: single_nested
+  prompt: "Calculate (15 + 9) times 3, then subtract 10."
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "(15 + 9) * 3 - 10"}
+  optimal_steps: 2
+  required_facts: ['62']
+  judge_notes: "Tests whether the model can translate a multi-clause instruction into one well-formed nested expression. Final answer should be 62."
+
+- id: nested_calendar_iso_date
+  category: single_nested
+  prompt: "Check my calendar for the first of September 2026 — use ISO format when calling the tool."
+  available_tools: [get_calendar_events]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-09-01"}
+  optimal_steps: 2
+  required_facts: ['09:00']
+  judge_notes: "Tests date-format normalization (natural language -> ISO) into a typed argument."
+
+- id: nested_readfile_json
+  category: single_nested
+  prompt: "Read /config/settings.json and tell me whether autosave is enabled."
+  available_tools: [read_file]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/config/settings.json"}
+  optimal_steps: 2
+  required_facts: ['true']
+  judge_notes: "Answer must correctly parse the returned JSON string and state autosave=true."
+
+- id: nested_email_typed
+  category: single_nested
+  prompt: "Send an email to alex@example.com with subject 'Status update' and body 'The benchmark is running.'"
+  available_tools: [send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: send_email
+      arguments: {to: "alex@example.com", subject: "Status update", body: "The benchmark is running."}
+  optimal_steps: 2
+  required_facts: ['alex@example.com']
+  judge_notes: "Tests correct mapping of three distinct string fields, unambiguously named in the prompt."
+
+- id: multistep_search_then_weather
+  category: multi_step
+  prompt: "Search the web to find the capital of France, then tell me the current weather there."
+  available_tools: [web_search, get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "capital of France"}
+    - tool: get_weather
+      arguments: {location: "Paris"}
+  optimal_steps: 3
+  required_facts: ['32.6', 'Paris']
+  judge_notes: "The second tool call's argument (Paris) must come from the first tool's result, not be guessed upfront."
+
+- id: multistep_search_then_weather_2
+  category: multi_step
+  prompt: "Find out the capital of Japan, then check its weather."
+  available_tools: [web_search, get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "capital of Japan"}
+    - tool: get_weather
+      arguments: {location: "Tokyo"}
+  optimal_steps: 3
+  required_facts: ['-4.3', 'Tokyo']
+  judge_notes: "Same dependency pattern as multistep_search_then_weather with a different entity, to catch memorized-shortcut behavior."
+
+- id: multistep_calendar_then_calc
+  category: multi_step
+  prompt: "Look at my calendar for 2026-09-01, take the start time of the first event, and calculate how many hours that is after 06:00 (e.g. if it starts at 09:00, the answer is 3)."
+  available_tools: [get_calendar_events, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-09-01"}
+    - tool: calculator
+      arguments: {expression: "9 - 6"}
+  optimal_steps: 3
+  required_facts: ['3']
+  judge_notes: "get_calendar_events('2026-09-01') deterministically returns a first event starting at 09:00 in this harness. Grader tolerance: any calculator expression evaluating to 3 is acceptable even if the exact string differs; see metrics_rule for numeric-equivalence matching."
+
+- id: multistep_readfile_then_calc
+  category: multi_step
+  prompt: "Read /reports/q3.txt to find the Q3 revenue figure, then calculate what it would be with a 10% increase."
+  available_tools: [read_file, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/reports/q3.txt"}
+    - tool: calculator
+      arguments: {expression: "482000 * 1.1"}
+  optimal_steps: 3
+  required_facts: ['530200']
+  judge_notes: "File content states 'Q3 revenue: $482,000'. Second call's expression must be numerically equivalent to 482000*1.1 = 530200."
+
+- id: multistep_search_ocean_weather
+  category: multi_step
+  prompt: "Search for the largest ocean, then check the weather in a coastal city it mentions."
+  available_tools: [web_search, get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "largest ocean"}
+    - tool: get_weather
+      arguments: {location: "Tokyo"}
+  optimal_steps: 3
+  required_facts: ['-4.3', 'Tokyo']
+  judge_notes: "Search result mentions Tokyo as a bordering coastal city. Accept any city name literally present in the returned snippet for the second call."
+
+- id: no_tool_greeting
+  category: no_tool
+  prompt: "Hi! How are you doing today?"
+  available_tools: [get_weather, get_calendar_events, web_search, calculator, read_file]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "This is a plain greeting. Any tool call here is a false positive — degradation to watch for under quantization."
+
+- id: no_tool_math_mental
+  category: no_tool
+  prompt: "What is 2 plus 2?"
+  available_tools: [calculator, get_weather]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Trivial arithmetic a model can answer directly. Calling the calculator tool is not wrong per se but is graded as a minor efficiency loss by the judge; NOT calling any tool is the target trajectory for the rule-based grader."
+
+- id: no_tool_general_knowledge
+  category: no_tool
+  prompt: "In one sentence, explain what photosynthesis is."
+  available_tools: [web_search, get_weather, calculator]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "General knowledge question with no need for live/external data. A tool call here is a hallucinated dependency."
+
+- id: no_tool_opinion
+  category: no_tool
+  prompt: "Do you think Python or Rust is a better first programming language to learn?"
+  available_tools: [web_search, calculator, get_weather]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Opinion/reasoning question; no tool resolves this better than direct reasoning."
+
+- id: distractor_weather_with_email
+  category: distractor
+  prompt: "What's the weather in Berlin?"
+  available_tools: [get_weather, send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Berlin"}
+  optimal_steps: 2
+  required_facts: ['-2.7', 'Berlin']
+  judge_notes: "send_email is an irrelevant distractor tool present in the schema; calling it is a hallucinated/spurious call and should be flagged."
+
+- id: distractor_calc_with_search
+  category: distractor
+  prompt: "What is 100 divided by 4?"
+  available_tools: [calculator, web_search, send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "100 / 4"}
+  optimal_steps: 2
+  required_facts: ['25']
+  judge_notes: "Two distractor tools present (web_search, send_email). Only calculator is relevant."
+
+- id: distractor_calendar_with_all
+  category: distractor
+  prompt: "What's on my calendar for 2026-09-01?"
+  available_tools: [get_calendar_events, get_weather, calculator, send_email, web_search]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-09-01"}
+  optimal_steps: 2
+  required_facts: ['09:00']
+  judge_notes: "Full tool set exposed as distractors; only get_calendar_events is correct. Stress test for spurious multi-tool calling under quantization."
+
+- id: clarify_ambiguous_location
+  category: clarify
+  prompt: "What's the weather like there?"
+  available_tools: [get_weather]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "'There' has no antecedent — no location has been established in this conversation. Correct behavior is to ask which location, not to guess or call the tool with a placeholder."
+
+- id: clarify_ambiguous_date
+  category: clarify
+  prompt: "Can you check what I have going on that day?"
+  available_tools: [get_calendar_events]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "'That day' has no referent in this single-turn context. Correct behavior is a clarifying question, not guessing a date."
+
+- id: clarify_ambiguous_file
+  category: clarify
+  prompt: "Can you open that file and tell me what's in it?"
+  available_tools: [read_file]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "No file path was given anywhere. Calling read_file with a guessed/placeholder path is a failure mode; asking which file is correct."
+
+- id: long_context_needle
+  category: long_context
+  max_steps: 4
+  prompt: |
+    Below is an internal engineering log. Read it, then at the end, calculate
+    the passcode mentioned in the log multiplied by 2, using the calculator tool.
+
+    --- LOG START ---
+    {{LONG_FILLER_2000_WORDS}}
+    Note from ops: today's rotating access passcode is 4471. Do not share it outside the team.
+    {{LONG_FILLER_2000_WORDS}}
+    --- LOG END ---
+
+    What is the passcode multiplied by 2?
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "4471 * 2"}
+  optimal_steps: 2
+  required_facts: ['8942']
+  judge_notes: "Tests retrieval of a single fact (passcode=4471) buried near the middle of a long filler document, near this model's practical context limit. The needle appears once, surrounded by generic filler on both sides."
+
+# --- Expansion batch: +75 cases (102 total). Same 7 categories, same tool
+# registry (two more canned search entries and four more fake_fs paths were
+# added to tools.py to support this without duplicate/ambiguous ground truth).
+
+- id: simple_weather_3
+  category: single_simple
+  prompt: "What's the weather in Berlin?"
+  available_tools: [get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Berlin"}
+  optimal_steps: 2
+  required_facts: ['-2.7', 'Berlin']
+  judge_notes: "Straightforward single tool call, different city than existing weather cases."
+
+- id: simple_weather_4
+  category: single_simple
+  prompt: "Tell me the weather in Sydney right now."
+  available_tools: [get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Sydney"}
+  optimal_steps: 2
+  required_facts: ['26.5', 'Sydney']
+  judge_notes: "Straightforward single tool call."
+
+- id: simple_weather_5
+  category: single_simple
+  prompt: "How's the weather in Mumbai today?"
+  available_tools: [get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Mumbai"}
+  optimal_steps: 2
+  required_facts: ['16.8', 'Mumbai']
+  judge_notes: "Straightforward single tool call."
+
+- id: simple_calendar_2
+  category: single_simple
+  prompt: "What's on my calendar for 2026-10-01?"
+  available_tools: [get_calendar_events]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-10-01"}
+  optimal_steps: 2
+  required_facts: []
+  judge_notes: "This date deterministically returns zero events in this harness — answer should clearly state the day is free, not fabricate events."
+
+- id: simple_calendar_3
+  category: single_simple
+  prompt: "Do I have anything scheduled on 2026-12-25?"
+  available_tools: [get_calendar_events]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-12-25"}
+  optimal_steps: 2
+  required_facts: []
+  judge_notes: "Zero events for this date; answer should say the day is free."
+
+- id: simple_calendar_4
+  category: single_simple
+  prompt: "Check my calendar for 2027-01-01."
+  available_tools: [get_calendar_events]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2027-01-01"}
+  optimal_steps: 2
+  required_facts: []
+  judge_notes: "Zero events for this date; answer should say the day is free."
+
+- id: simple_search_2
+  category: single_simple
+  prompt: "Search the web for the capital of Germany."
+  available_tools: [web_search]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "capital of Germany"}
+  optimal_steps: 2
+  required_facts: ['Berlin']
+  judge_notes: "Should report Berlin as the answer, from the returned snippet."
+
+- id: simple_search_3
+  category: single_simple
+  prompt: "Search the web for the largest ocean on Earth."
+  available_tools: [web_search]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "largest ocean"}
+  optimal_steps: 2
+  required_facts: ['Pacific Ocean']
+  judge_notes: "Should report the Pacific Ocean as the answer."
+
+- id: simple_search_4
+  category: single_simple
+  prompt: "Look up the capital of Egypt for me."
+  available_tools: [web_search]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "capital of Egypt"}
+  optimal_steps: 2
+  required_facts: ['Cairo']
+  judge_notes: "Should report Cairo as the answer."
+
+- id: simple_calc_2
+  category: single_simple
+  prompt: "What is 900 minus 235?"
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "900 - 235"}
+  optimal_steps: 2
+  required_facts: ['665']
+  judge_notes: "Final answer should state 665."
+
+- id: simple_calc_3
+  category: single_simple
+  prompt: "What is 12 times 12?"
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "12 * 12"}
+  optimal_steps: 2
+  required_facts: ['144']
+  judge_notes: "Final answer should state 144."
+
+- id: simple_calc_4
+  category: single_simple
+  prompt: "What is 144 divided by 12?"
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "144 / 12"}
+  optimal_steps: 2
+  required_facts: ['12']
+  judge_notes: "Final answer should state 12."
+
+- id: simple_calc_5
+  category: single_simple
+  prompt: "What is 7 times 8?"
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "7 * 8"}
+  optimal_steps: 2
+  required_facts: ['56']
+  judge_notes: "Final answer should state 56."
+
+- id: simple_readfile_2
+  category: single_simple
+  prompt: "Read the file at /notes/ideas.txt and tell me what's on it."
+  available_tools: [read_file]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/notes/ideas.txt"}
+  optimal_steps: 2
+  required_facts: ['dark mode']
+  judge_notes: "Should list the idea items from the file content."
+
+- id: simple_readfile_3
+  category: single_simple
+  prompt: "Read /logs/error.log and summarize it."
+  available_tools: [read_file]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/logs/error.log"}
+  optimal_steps: 2
+  required_facts: ['db_timeout']
+  judge_notes: "Should mention repeated db_timeout errors followed by a recovery, from the file content."
+
+- id: nested_weather_unit_2
+  category: single_nested
+  prompt: "What's the temperature in Mumbai in Fahrenheit?"
+  available_tools: [get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Mumbai", unit: "fahrenheit"}
+  optimal_steps: 2
+  required_facts: ['62.2', 'Mumbai']
+  judge_notes: "Correct handling of the enum-typed 'unit' parameter."
+
+- id: nested_weather_unit_3
+  category: single_nested
+  prompt: "Temperature in Moscow, in Fahrenheit please."
+  available_tools: [get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Moscow", unit: "fahrenheit"}
+  optimal_steps: 2
+  required_facts: ['26.6', 'Moscow']
+  judge_notes: "Correct handling of the enum-typed 'unit' parameter, terser phrasing than other unit cases."
+
+- id: nested_weather_default_unit
+  category: single_nested
+  prompt: "How hot is it in Cairo? Give me celsius."
+  available_tools: [get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Cairo", unit: "celsius"}
+  optimal_steps: 2
+  required_facts: ['23.2', 'Cairo']
+  judge_notes: "Unit is explicitly requested even though it matches the default — tests the model still passes it explicitly rather than omitting it."
+
+- id: nested_calc_multi
+  category: single_nested
+  prompt: "Double 45, then add 7."
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "45 * 2 + 7"}
+  optimal_steps: 2
+  required_facts: ['97']
+  judge_notes: "Tests translating a two-step verbal instruction into one expression. Final answer should be 97."
+
+- id: nested_calc_percent
+  category: single_nested
+  prompt: "What is 20% of 250?"
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "250 * 0.2"}
+  optimal_steps: 2
+  required_facts: ['50']
+  judge_notes: "Tests converting a percentage phrase into a decimal-multiplication expression. Final answer should be 50."
+
+- id: nested_calc_negative
+  category: single_nested
+  prompt: "What is 50 minus 75?"
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "50 - 75"}
+  optimal_steps: 2
+  required_facts: ['-25']
+  judge_notes: "Result is negative (-25) — tests the model doesn't reject or mishandle a negative result."
+
+- id: nested_calc_parens2
+  category: single_nested
+  prompt: "Calculate (100 minus 40) divided by (2 plus 4)."
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "(100 - 40) / (2 + 4)"}
+  optimal_steps: 2
+  required_facts: ['10']
+  judge_notes: "Tests nested-parenthesis translation. Final answer should be 10."
+
+- id: nested_calc_div
+  category: single_nested
+  prompt: "What is 81 divided by 9, then add 1?"
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "81 / 9 + 1"}
+  optimal_steps: 2
+  required_facts: ['10']
+  judge_notes: "Final answer should be 10."
+
+- id: nested_calendar_iso_date_2
+  category: single_nested
+  prompt: "Check my calendar for New Year's Day 2027 — use ISO format."
+  available_tools: [get_calendar_events]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2027-01-01"}
+  optimal_steps: 2
+  required_facts: []
+  judge_notes: "Tests natural-language-holiday-name to ISO-date normalization."
+
+- id: nested_calendar_natural_3
+  category: single_nested
+  prompt: "Look at my schedule for October first, twenty twenty-six — ISO format please."
+  available_tools: [get_calendar_events]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-10-01"}
+  optimal_steps: 2
+  required_facts: []
+  judge_notes: "Tests spelled-out-year-and-date to ISO-date normalization."
+
+- id: nested_readfile_q4
+  category: single_nested
+  prompt: "Read /reports/q4.txt and tell me the growth percentage."
+  available_tools: [read_file]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/reports/q4.txt"}
+  optimal_steps: 2
+  required_facts: ['5.8']
+  judge_notes: "Answer must correctly extract '5.8% QoQ' from the file content."
+
+- id: nested_readfile_errorlog
+  category: single_nested
+  prompt: "Read /logs/error.log and tell me how many times a db_timeout occurred."
+  available_tools: [read_file]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/logs/error.log"}
+  optimal_steps: 2
+  required_facts: ['2']
+  judge_notes: "File content has exactly two db_timeout ERROR lines followed by an INFO recovery line. Answer should state 2."
+
+- id: nested_readfile_limits
+  category: single_nested
+  prompt: "Read /config/limits.json and tell me the rate limit per minute."
+  available_tools: [read_file]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/config/limits.json"}
+  optimal_steps: 2
+  required_facts: ['60']
+  judge_notes: "Answer must correctly parse the returned JSON and state rate_limit_per_min=60."
+
+- id: nested_email_2
+  category: single_nested
+  prompt: "Email jordan@example.com with subject 'Meeting moved' and body 'The meeting is now at 3pm.'"
+  available_tools: [send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: send_email
+      arguments: {to: "jordan@example.com", subject: "Meeting moved", body: "The meeting is now at 3pm."}
+  optimal_steps: 2
+  required_facts: ['jordan@example.com']
+  judge_notes: "Tests correct mapping of three distinct string fields."
+
+- id: nested_email_3
+  category: single_nested
+  prompt: "Send an email to sam@example.com about 'Reminder' saying \"Don't forget the demo tomorrow.\""
+  available_tools: [send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: send_email
+      arguments: {to: "sam@example.com", subject: "Reminder", body: "Don't forget the demo tomorrow."}
+  optimal_steps: 2
+  required_facts: ['sam@example.com']
+  judge_notes: "Tests correct field mapping when the prompt uses 'about'/'saying' instead of explicit subject/body labels."
+
+- id: multistep_search_then_weather_3
+  category: multi_step
+  prompt: "Find out the capital of Germany, then check its weather."
+  available_tools: [web_search, get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "capital of Germany"}
+    - tool: get_weather
+      arguments: {location: "Berlin"}
+  optimal_steps: 3
+  required_facts: ['-2.7', 'Berlin']
+  judge_notes: "Second call's location (Berlin) must come from the first tool's result."
+
+- id: multistep_search_then_weather_4
+  category: multi_step
+  prompt: "Search for the capital of Egypt, then tell me the weather there."
+  available_tools: [web_search, get_weather]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "capital of Egypt"}
+    - tool: get_weather
+      arguments: {location: "Cairo"}
+  optimal_steps: 3
+  required_facts: ['23.2', 'Cairo']
+  judge_notes: "Second call's location (Cairo) must come from the first tool's result."
+
+- id: multistep_calendar_then_calc_2
+  category: multi_step
+  prompt: "Look at my calendar for 2026-09-15, take the start time of the first event, and calculate how many hours that is after 06:00."
+  available_tools: [get_calendar_events, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-09-15"}
+    - tool: calculator
+      arguments: {expression: "9 - 6"}
+  optimal_steps: 3
+  required_facts: ['3']
+  judge_notes: "get_calendar_events('2026-09-15') deterministically returns a first event starting at 09:00 in this harness. Any calculator expression evaluating to 3 is acceptable."
+
+- id: multistep_calendar_then_calc_3
+  category: multi_step
+  prompt: "Check my calendar for 2026-09-15. Take the first event's end time minus its start time to get the duration in hours."
+  available_tools: [get_calendar_events, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-09-15"}
+    - tool: calculator
+      arguments: {expression: "10 - 9"}
+  optimal_steps: 3
+  required_facts: ['1']
+  judge_notes: "First event runs 09:00-10:00 in this harness, a 1-hour duration. Any calculator expression evaluating to 1 is acceptable."
+
+- id: multistep_readfile_then_calc_2
+  category: multi_step
+  prompt: "Read /reports/q4.txt to find the revenue figure, then calculate what it would be with a 5% increase."
+  available_tools: [read_file, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/reports/q4.txt"}
+    - tool: calculator
+      arguments: {expression: "510000 * 1.05"}
+  optimal_steps: 3
+  required_facts: ['535500']
+  judge_notes: "File states Q4 revenue $510,000. Second call must be numerically equivalent to 510000*1.05 = 535500."
+
+- id: multistep_readfile_then_calc_3
+  category: multi_step
+  prompt: "Read /reports/q3.txt for the revenue figure, then calculate the monthly average by dividing it by 3."
+  available_tools: [read_file, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/reports/q3.txt"}
+    - tool: calculator
+      arguments: {expression: "482000 / 3"}
+  optimal_steps: 3
+  required_facts: ['160666.67']
+  judge_notes: "File states Q3 revenue $482,000. Second call must be numerically equivalent to 482000/3."
+
+- id: multistep_readfile_then_calc_4
+  category: multi_step
+  prompt: "Read /config/limits.json, then calculate double the rate limit value."
+  available_tools: [read_file, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/config/limits.json"}
+    - tool: calculator
+      arguments: {expression: "60 * 2"}
+  optimal_steps: 3
+  required_facts: ['120']
+  judge_notes: "rate_limit_per_min is 60 in this harness. Second call must evaluate to 120."
+
+- id: multistep_readfile_then_calc_5
+  category: multi_step
+  prompt: "Read /config/limits.json, then calculate what 10% over the max_users limit would be."
+  available_tools: [read_file, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/config/limits.json"}
+    - tool: calculator
+      arguments: {expression: "200 * 1.1"}
+  optimal_steps: 3
+  required_facts: ['220']
+  judge_notes: "max_users is 200 in this harness. Second call must be numerically equivalent to 220."
+
+- id: multistep_weather_then_calc
+  category: multi_step
+  prompt: "Check the weather in Berlin, then calculate how many degrees below freezing the temperature is (0 minus the temperature)."
+  available_tools: [get_weather, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Berlin"}
+    - tool: calculator
+      arguments: {expression: "0 - (-2.7)"}
+  optimal_steps: 3
+  required_facts: ['2.7']
+  judge_notes: "Berlin's temperature is -2.7C in this harness. Second call must be numerically equivalent to 0-(-2.7) = 2.7."
+
+- id: multistep_weather_then_calc_2
+  category: multi_step
+  prompt: "Check the weather in Reykjavik, then calculate the temperature doubled."
+  available_tools: [get_weather, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Reykjavik"}
+    - tool: calculator
+      arguments: {expression: "34.3 * 2"}
+  optimal_steps: 3
+  required_facts: ['68.6']
+  judge_notes: "Reykjavik's temperature is 34.3C in this harness. Second call must be numerically equivalent to 68.6."
+
+- id: multistep_readfile_then_email
+  category: multi_step
+  prompt: "Read /notes/todo.txt, then email a short summary of it to alex@example.com with subject 'Todo summary'."
+  available_tools: [read_file, send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/notes/todo.txt"}
+    - tool: send_email
+      arguments: {to: "alex@example.com", subject: "Todo summary"}
+  optimal_steps: 3
+  required_facts: ['alex@example.com']
+  judge_notes: "The email body is model-authored free text summarizing the file (not graded exactly — only 'to' and 'subject' are checked). Judge should confirm the body plausibly reflects the todo list contents."
+
+- id: multistep_calc_then_email
+  category: multi_step
+  prompt: "Calculate 45 times 3, then email the result to pat@example.com with subject 'Result'."
+  available_tools: [calculator, send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "45 * 3"}
+    - tool: send_email
+      arguments: {to: "pat@example.com", subject: "Result"}
+  optimal_steps: 3
+  required_facts: ['pat@example.com']
+  judge_notes: "Email body should state 135 (only 'to'/'subject' are graded exactly)."
+
+- id: multistep_calendar_then_email
+  category: multi_step
+  prompt: "Check my calendar for 2026-09-01, then email alex@example.com with subject 'Schedule confirmed' summarizing what you found."
+  available_tools: [get_calendar_events, send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-09-01"}
+    - tool: send_email
+      arguments: {to: "alex@example.com", subject: "Schedule confirmed"}
+  optimal_steps: 3
+  required_facts: ['alex@example.com']
+  judge_notes: "Email body should reference the returned event (only 'to'/'subject' are graded exactly)."
+
+- id: no_tool_thanks
+  category: no_tool
+  prompt: "Thanks, that's all for now!"
+  available_tools: [get_weather, get_calendar_events, web_search, calculator, read_file, send_email]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Plain acknowledgement, no request to act on. Any tool call is a false positive."
+
+- id: no_tool_joke
+  category: no_tool
+  prompt: "Tell me a short joke."
+  available_tools: [web_search, calculator, get_weather]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "No tool provides jokes; this should be answered directly from the model's own generation."
+
+- id: no_tool_translate
+  category: no_tool
+  prompt: "How do you say 'thank you' in French?"
+  available_tools: [web_search, calculator, get_weather]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Common-knowledge translation; a tool call here is an unnecessary dependency."
+
+- id: no_tool_define
+  category: no_tool
+  prompt: "What does 'ubiquitous' mean?"
+  available_tools: [web_search, calculator, get_weather]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Common vocabulary definition, answerable directly."
+
+- id: no_tool_math2
+  category: no_tool
+  prompt: "What's 10 times 10?"
+  available_tools: [calculator, get_weather]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Trivial arithmetic. Rule-based grader targets no tool call; judge treats a calculator call as a minor efficiency loss, not a failure."
+
+- id: no_tool_recipe
+  category: no_tool
+  prompt: "Give me a simple recipe for scrambled eggs."
+  available_tools: [web_search, calculator, get_weather]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Common-knowledge request with no live-data dependency."
+
+- id: no_tool_grammar
+  category: no_tool
+  prompt: "Is it 'affect' or 'effect' when describing an emotional impact?"
+  available_tools: [web_search, calculator]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Grammar question answerable directly."
+
+- id: no_tool_smalltalk
+  category: no_tool
+  prompt: "What's your favorite color?"
+  available_tools: [web_search, calculator, get_weather]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Small talk, no factual dependency."
+
+- id: no_tool_spelling
+  category: no_tool
+  prompt: "How do you spell 'necessary'?"
+  available_tools: [web_search, calculator]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "Common-word spelling, answerable directly."
+
+- id: no_tool_advice
+  category: no_tool
+  prompt: "Any tips for staying focused while studying?"
+  available_tools: [web_search, calculator, get_weather]
+  expected_behavior: no_tool
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "General advice question, no live-data dependency."
+
+- id: distractor_search_with_calc
+  category: distractor
+  prompt: "Search the web for the capital of France."
+  available_tools: [web_search, calculator, send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "capital of France"}
+  optimal_steps: 2
+  required_facts: ['Paris']
+  judge_notes: "calculator and send_email are irrelevant distractors here."
+
+- id: distractor_readfile_with_weather
+  category: distractor
+  prompt: "Read the file at /notes/todo.txt."
+  available_tools: [read_file, get_weather, send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/notes/todo.txt"}
+  optimal_steps: 2
+  required_facts: ['Buy milk']
+  judge_notes: "get_weather and send_email are irrelevant distractors here."
+
+- id: distractor_calc_with_email_search
+  category: distractor
+  prompt: "What is 88 minus 33?"
+  available_tools: [calculator, send_email, web_search]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "88 - 33"}
+  optimal_steps: 2
+  required_facts: ['55']
+  judge_notes: "send_email and web_search are irrelevant distractors here."
+
+- id: distractor_weather_with_calendar
+  category: distractor
+  prompt: "What's the weather in Nairobi?"
+  available_tools: [get_weather, get_calendar_events, calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_weather
+      arguments: {location: "Nairobi"}
+  optimal_steps: 2
+  required_facts: ['9.7', 'Nairobi']
+  judge_notes: "get_calendar_events and calculator are irrelevant distractors here."
+
+- id: distractor_calendar_with_calc
+  category: distractor
+  prompt: "What do I have scheduled for 2026-10-01?"
+  available_tools: [get_calendar_events, calculator, read_file]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-10-01"}
+  optimal_steps: 2
+  required_facts: []
+  judge_notes: "calculator and read_file are irrelevant distractors here."
+
+- id: distractor_readfile_with_all
+  category: distractor
+  prompt: "Read /reports/q4.txt."
+  available_tools: [read_file, get_weather, get_calendar_events, calculator, web_search, send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: read_file
+      arguments: {path: "/reports/q4.txt"}
+  optimal_steps: 2
+  required_facts: ['510000']
+  judge_notes: "Full tool set exposed as distractors; only read_file is correct. Stress test for spurious multi-tool calling."
+
+- id: distractor_search_with_all
+  category: distractor
+  prompt: "Search for the largest ocean."
+  available_tools: [web_search, get_weather, get_calendar_events, calculator, read_file, send_email]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: web_search
+      arguments: {query: "largest ocean"}
+  optimal_steps: 2
+  required_facts: ['Pacific Ocean']
+  judge_notes: "Full tool set exposed as distractors; only web_search is correct."
+
+- id: distractor_email_relevant_with_all
+  category: distractor
+  prompt: "Send an email to lee@example.com with subject 'Hi' and body 'Just checking in.'"
+  available_tools: [send_email, get_weather, get_calendar_events, calculator, web_search, read_file]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: send_email
+      arguments: {to: "lee@example.com", subject: "Hi", body: "Just checking in."}
+  optimal_steps: 2
+  required_facts: ['lee@example.com']
+  judge_notes: "Inverted distractor case: send_email is the CORRECT tool here (the other five are the distractors), testing that a model doesn't over-correct into avoiding send_email entirely."
+
+- id: clarify_ambiguous_email
+  category: clarify
+  prompt: "Can you send them an email about it?"
+  available_tools: [send_email]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "No recipient, subject, or body content established anywhere. Correct behavior is to ask for these, not to guess placeholders."
+
+- id: clarify_ambiguous_calc
+  category: clarify
+  prompt: "What's the total?"
+  available_tools: [calculator]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "No numbers or expression given. Correct behavior is to ask what to total, not to guess an expression."
+
+- id: clarify_ambiguous_weather_2
+  category: clarify
+  prompt: "Is it going to rain tomorrow?"
+  available_tools: [get_weather]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "No location given anywhere in this single-turn context. Correct behavior is to ask which location."
+
+- id: clarify_ambiguous_search
+  category: clarify
+  prompt: "Can you look that up for me?"
+  available_tools: [web_search]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "'That' has no antecedent — no query has been established. Correct behavior is to ask what to search for."
+
+- id: clarify_pronoun_file
+  category: clarify
+  prompt: "Update that file with the new info."
+  available_tools: [read_file]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "No file path given, and the only available tool can't even write/update — a good response asks which file (and notes the update itself isn't possible), rather than calling read_file with a guessed path."
+
+- id: clarify_ambiguous_recipient
+  category: clarify
+  prompt: "Email him the report."
+  available_tools: [send_email, read_file]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "No recipient address, and no specific report file identified. Correct behavior is a clarifying question, not a guessed email address or file path."
+
+- id: clarify_missing_date_range
+  category: clarify
+  prompt: "What's on my schedule this week?"
+  available_tools: [get_calendar_events]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "get_calendar_events takes a single ISO date, not a range — 'this week' is ambiguous about which day(s). Correct behavior is to ask which specific date, not to guess one day of the week."
+
+- id: clarify_vague_calc
+  category: clarify
+  prompt: "Multiply it by two."
+  available_tools: [calculator]
+  expected_behavior: clarify
+  expected_trajectory: []
+  optimal_steps: 1
+  required_facts: []
+  judge_notes: "'It' has no antecedent value in this single-turn context. Correct behavior is to ask what value to multiply."
+
+- id: long_context_needle_early
+  category: long_context
+  max_steps: 4
+  prompt: |
+    Below is an internal engineering log.
+
+    Note from ops: today's rotating access passcode is 8823. Do not share it outside the team.
+
+    --- LOG START ---
+    {{LONG_FILLER_2000_WORDS}}
+    --- LOG END ---
+
+    Read the log above, then calculate the passcode multiplied by 3, using the calculator tool.
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "8823 * 3"}
+  optimal_steps: 2
+  required_facts: ['26469']
+  judge_notes: "Tests retrieval of a single fact (passcode=8823) placed at the very START of a long filler document, before ~2000 words of unrelated text — the opposite placement from long_context_needle."
+
+- id: long_context_needle_late
+  category: long_context
+  max_steps: 4
+  prompt: |
+    Below is an internal engineering log. Read it carefully, then answer the question at the end.
+
+    --- LOG START ---
+    {{LONG_FILLER_2000_WORDS}}
+    Note from ops: today's rotating access passcode is 5510. Do not share it outside the team.
+    --- LOG END ---
+
+    What is the passcode divided by 2? Use the calculator tool.
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "5510 / 2"}
+  optimal_steps: 2
+  required_facts: ['2755']
+  judge_notes: "Tests retrieval of a single fact (passcode=5510) placed at the very END of ~2000 words of unrelated filler, right before the question — the opposite placement from long_context_needle_early."
+
+- id: simple_calc_6
+  category: single_simple
+  prompt: "What is 250 plus 750?"
+  available_tools: [calculator]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: calculator
+      arguments: {expression: "250 + 750"}
+  optimal_steps: 2
+  required_facts: ['1000']
+  judge_notes: "Final answer should state 1000."
+
+- id: nested_calendar_natural_4
+  category: single_nested
+  prompt: "Check my calendar for Christmas Day 2026 — ISO format please."
+  available_tools: [get_calendar_events]
+  expected_behavior: tool_call
+  expected_trajectory:
+    - tool: get_calendar_events
+      arguments: {date: "2026-12-25"}
+  optimal_steps: 2
+  required_facts: []
+  judge_notes: "Tests holiday-name-to-ISO-date normalization. This date deterministically returns zero events."
