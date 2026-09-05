@@ -58,6 +58,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--enable-qai-hub", action="store_true", help="opt into the Qualcomm AI Hub cloud target (off by default)")
     p.add_argument("--qai-hub-device", default="Snapdragon 8 Elite QRD", help="target device profile string for AI Hub")
+    p.add_argument(
+        "--qai-hub-profile",
+        action="store_true",
+        help="after compiling, profile the artifact on a real device in Qualcomm's device farm "
+        "(on-device latency, peak memory, NPU/GPU/CPU op split). Free, adds a few minutes.",
+    )
     return p
 
 
@@ -74,6 +80,7 @@ def build_context(out_dir: Path, args: argparse.Namespace) -> ConversionContext:
             "gguf_quant_types": args.gguf_quant_types,
             "enable_qai_hub": args.enable_qai_hub,
             "qai_hub_device": args.qai_hub_device,
+            "qai_hub_profile": args.qai_hub_profile,
         },
     )
 

@@ -9,9 +9,17 @@ rather than running anything locally. It requires:
     QAI_HUB_API_TOKEN env var)
   - network access to Qualcomm's cloud
 
-It is disabled unless `--enable-qai-hub` is explicitly passed on the CLI, since
-it is the one target in this project that leaves the machine and may incur
-cloud usage against your account.
+It is disabled unless `--enable-qai-hub` is explicitly passed on the CLI,
+since it is the one target in this project that sends your model off the
+machine. AI Hub itself is free ("currently completely free to use" per their
+FAQ, covering compile, profile and inference jobs) -- the opt-in is about the
+data leaving, not about cost.
+
+With `--qai-hub-profile`, the compiled artifact is additionally profiled on a
+real Snapdragon device in Qualcomm's device farm, recording on-device latency,
+peak memory and the per-op compute-unit split (NPU/GPU/CPU) -- the only way to
+get real hardware numbers for this target, since there is no local Qualcomm
+device to benchmark against.
 """
 
 from __future__ import annotations
@@ -130,11 +138,60 @@ def convert(model_id: str, out_dir: Path, ctx: ConversionContext) -> ConversionR
     if last_err is not None:
         raise RuntimeError(f"qai-hub: target model never became downloadable after job success: {last_err}")
 
-    return ConversionResult(
-        status="ok",
-        output_path=str(out_dir),
-        extra={"device_used": "cloud (Qualcomm AI Hub)", "target_device": target_device},
+    extra = {"device_used": "cloud (Qualcomm AI Hub)", "target_device": target_device}
+
+    if ctx.extra.get("qai_hub_profile", False):
+        extra.update(_profile_on_device(hub, compile_job, target_device, out_dir))
+
+    return ConversionResult(status="ok", output_path=str(out_dir), extra=extra)
+
+
+def _profile_on_device(hub, compile_job, target_device: str, out_dir: Path) -> dict:
+    """Profile the compiled artifact on a real device in Qualcomm's device farm.
+
+    Reuses the finished compile job's target model, so nothing is re-uploaded
+    (the upload is by far the slowest part of this target). Profiling failures
+    are recorded but not raised -- the conversion itself already succeeded by
+    this point, and losing a good artifact over a profiling hiccup would be
+    the wrong trade.
+    """
+    import statistics
+
+    print(f"[qai-hub] profiling on real device: {target_device}")
+    profile_job = hub.submit_profile_job(
+        model=compile_job.get_target_model(), device=hub.Device(target_device)
     )
+    print(f"[qai-hub] profile job: {profile_job.job_id} ({profile_job.url})")
+
+    profile_job.wait()
+    status = profile_job.get_status()
+    if not status.success:
+        print(f"[qai-hub] profiling failed (artifact is still valid): {status.message}")
+        return {"profile_error": status.message, "profile_job_id": profile_job.job_id}
+
+    results = profile_job.download_profile()
+    (out_dir / "qai_hub_profile.json").write_text(json.dumps(results, indent=2))
+
+    summary = results.get("execution_summary", {})
+    times = summary.get("all_inference_times") or []
+    # Per-op timings come back as 0 for a context binary (the graph executes as
+    # one unit), so the compute-unit split is reported as op counts, not time.
+    units: dict[str, int] = {}
+    for op in results.get("execution_detail", []):
+        unit = op.get("compute_unit", "UNKNOWN")
+        units[unit] = units.get(unit, 0) + 1
+
+    return {
+        "profile_job_id": profile_job.job_id,
+        "profile_job_url": profile_job.url,
+        "inference_ms_median": round(statistics.median(times) / 1000, 2) if times else None,
+        "inference_ms_min": round(min(times) / 1000, 2) if times else None,
+        "inference_runs": len(times),
+        "inference_peak_mem_mib": round(summary.get("estimated_inference_peak_memory", 0) / 1048576, 1),
+        "cold_load_ms": round(summary.get("first_load_time", 0) / 1000),
+        "warm_load_ms": round(summary.get("warm_load_time", 0) / 1000),
+        "ops_by_compute_unit": units,
+    }
 
 
 register(

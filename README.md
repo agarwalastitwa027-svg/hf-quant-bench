@@ -483,6 +483,41 @@ target artifact can briefly lag the job being reported successful ("Model
 file has not yet been uploaded"). The ~6 GB local `.pt2` is deleted straight
 after upload.
 
+#### On-device profile (real Snapdragon hardware)
+
+`--qai-hub-profile` additionally runs the compiled artifact on a real device
+in Qualcomm's device farm — the only way to get hardware numbers for this
+target, since there is no local Qualcomm device here. Measured on Snapdragon
+8 Elite QRD, 100 inference runs (raw output in
+`outputs/<model>/qai-hub/qai_hub_profile.json`):
+
+| Metric | Value |
+| --- | --- |
+| Inference latency (median of 100) | **45.4 ms** (min 43.0, max 48.1) |
+| Peak inference memory | **119.6 MiB** |
+| Cold load | 597 ms |
+| Warm load | 541 ms |
+| Compute-unit split | **1659 / 1659 ops on NPU** (zero CPU/GPU fallback) |
+
+Two things worth pulling out. **Full NPU residency** — every one of the 1659
+ops was placed on the Hexagon NPU with nothing falling back to CPU or GPU,
+which is the outcome you want and not a given for a graph exported this
+generically. And **peak inference memory is ~120 MiB against a 3.56 GB
+artifact**, because the context binary memory-maps its weights rather than
+loading them all resident.
+
+**Do not compare that 45.4 ms against the `prefill_latency_s_mean` column in
+`results.csv`.** They are not the same measurement: the CSV's prefill runs
+over a full benchmark prompt, whereas this traced graph has a fixed
+`seq_len` of the dummy prompt's token count. The on-device number is a
+single forward pass over a much shorter input, so it would flatter the NPU
+badly if read as a like-for-like speed comparison.
+
+**Cost**: none. AI Hub is "currently completely free to use" per their FAQ,
+covering compile, profile and inference jobs alike. The `--enable-qai-hub`
+opt-in exists because this target sends your model off the machine, not
+because it bills you.
+
 **Caveat on what this artifact actually is**: the trace fixes `seq_len` to
 the dummy prompt's token count and carries no KV cache, so this is a proof
 that the conversion path works, not a deployable LLM. Real on-device LLM
