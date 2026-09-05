@@ -53,6 +53,13 @@ onnxruntime>=1.19
 # optimum[openvino]>=1.23
 
 # --- Qualcomm AI Hub target (optional, cloud, off by default) ---
+# Verified working with qai-hub 0.55.0 (compiled Qwen2.5-1.5B-Instruct to a
+# QNN context binary for Snapdragon 8 Elite QRD -- see README).
+# NOTE: installing it downgrades protobuf to 6.31.1, which pip flags as
+# conflicting with gptqmodel 7.3.5 (wants >=7.34.0). gptqmodel still imports
+# and runs at that protobuf version, so the constraint looks conservative
+# rather than load-bearing -- but if you need both targets in one venv and
+# hit a protobuf error, that pin is the first place to look.
 # qai-hub
 
 # --- benchmark harness ---

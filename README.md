@@ -323,6 +323,11 @@ only, on WSL" gracefully rather than failing the run.
 - No Apple silicon anywhere in this codebase — MLX is not a target, on purpose.
 - No local Qualcomm device — the `qai-hub` target is cloud-only, off by
   default, and requires `--enable-qai-hub` plus a configured API token.
+  It is **verified working** against Qwen2.5-1.5B-Instruct: it produces a
+  3.6 GB QNN context binary for a Snapdragon 8 Elite QRD profile. See
+  "What the `qai-hub` target needed" below for the five things that had to
+  be right — the defaults in the original implementation were wrong on all
+  five.
 - CPU-only conversions (fp16 re-save, GGUF, ONNX, OpenVINO IR export) run on
   CPU and print that they're doing so — they never touch the GPU
   unnecessarily.
@@ -433,6 +438,58 @@ each, all with real weights and real generation. Not a dry-run projection.
 **Formats that work and were fully benchmarked**: fp16, bnb-nf4, bnb-int8,
 gptq-4bit (calibrated on real wikitext2), awq-4bit (calibrated on real
 wikitext2, via the llm-compressor fallback), gguf-Q4_0/Q4_K_M/Q5_K_M/Q8_0.
+
+### What the `qai-hub` target needed
+
+The `qai-hub` cloud-compile target now works end-to-end — job
+[`jp39koxlp`](https://workbench.aihub.qualcomm.com/jobs/jp39koxlp/),
+producing a 3.56 GB QNN context binary for Snapdragon 8 Elite QRD in ~25
+minutes wall-clock (the bulk of which is a 5.76 GB upload and a 3.31 GB
+download, not compute). Getting there took five sequential fixes, each of
+which surfaced only after the previous one was corrected — and each costing
+a full ~8-minute upload to discover:
+
+1. **`torch.jit.trace` can't type HF's `ModelOutput` dataclasses.** Tracing
+   `AutoModelForCausalLM` directly dies on `CausalLMOutputWithPast`. Setting
+   `config.return_dict=False` is *not* a fix on transformers 5.14.1 — inner
+   submodules still hand back `ModelOutput` objects while outer code indexes
+   them as tuples, which just swaps one untraceable error for another. A thin
+   wrapper module returning `.logits` as a plain tensor is what actually works.
+2. **int64 I/O is unsupported on Hexagon.** Needs
+   `--truncate_64bit_io`, or the job fails at compile with exactly that
+   instruction in the message.
+3. **The kwarg is `options=`, not `compile_options=`.** The latter is what
+   the CLI calls it; the Python `submit_compile_job()` signature uses
+   `options`.
+4. **TorchScript uploads are deprecated and fail here.** AI Hub rejects the
+   `.pt` with "Failed to upgrade the exported ONNX model to opset 21" and its
+   own error text points at `torch.export`. Exporting an ExportedProgram
+   (`.pt2`) via `torch.export.export(..., strict=False)` and uploading that
+   file is the working path.
+5. **The default target runtime (LiteRT/tflite) has a hard size ceiling this
+   model exceeds** — "Model is too large for the LiteRT model format". AI
+   Hub's FAQ documents a >2 GB compile failure mode and recommends
+   quantization, but that ceiling is **specific to the LiteRT path**:
+   `--target_runtime qnn_context_binary` compiled the same unquantized fp32
+   graph without complaint. Worth knowing, because reading the 2 GB limit as
+   universal would lead you to conclude (as I initially did) that a 1.5B
+   model can't be compiled without quantizing first. It can.
+
+Two robustness fixes went in alongside those. The job id and dashboard URL
+are now written to `qai_hub_job.json` *immediately* after submission rather
+than on success, because a failure after the slow upload otherwise leaves no
+way to inspect the job; and `download()` is retried with backoff, because the
+target artifact can briefly lag the job being reported successful ("Model
+file has not yet been uploaded"). The ~6 GB local `.pt2` is deleted straight
+after upload.
+
+**Caveat on what this artifact actually is**: the trace fixes `seq_len` to
+the dummy prompt's token count and carries no KV cache, so this is a proof
+that the conversion path works, not a deployable LLM. Real on-device LLM
+deployment via AI Hub uses the `qai-hub-models` recipes, which split the
+model into prompt-processing and token-generation graphs with static KV-cache
+shapes and AIMET quantization. That is a substantially different pipeline and
+is not what this target does.
 
 **Formats that do NOT work in this environment, with real reasons**:
 - `torchao-int4` — torchao 0.18.0's default int4 packing format hard-requires
