@@ -8,17 +8,19 @@ outputs/
 .env
 *.log
 
-# Superseded/smoke/debug benchmark runs from earlier iterations -- only
-# bench_results_v3_full (the validated full run) and bench_results_v3_rescored
-# (the corrected superseding results, see README) are kept in the repo.
+# Superseded/smoke/debug benchmark runs from earlier iterations -- kept
+# directories are: bench_results_v3_full (the validated full run),
+# bench_results_v3_rescored (the corrected superseding results), and
+# bench_results_calibration_bug_run / bench_results_calibration_fixed_run
+# (the full 100-case GPTQ/AWQ runs backing the "calibration hurts tool-calling
+# here" headline finding -- see README). Everything below was a disposable
+# smoke/debug run and is not needed to support any claim in the README.
 bench_gate_test/
 bench_gptq_only/
 bench_kv_smoke/
 bench_kv_smoke2/
 bench_kv_smoke3/
 bench_rerun_final/
-bench_results_final/
-bench_results_final2/
 bench_results_full/
 bench_results_smoke/
 bench_results_smoke2/

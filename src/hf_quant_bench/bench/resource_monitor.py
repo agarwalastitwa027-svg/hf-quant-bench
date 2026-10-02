@@ -160,9 +160,24 @@ _vram_poller: _Poller | None = None
 _ram_poller: _Poller | None = None
 _vram_method: str = "unavailable"
 
+# The device-wide memory.used reading from the very first reset_peak_tracking()
+# call this process ever makes -- i.e. before any format has loaded a model.
+# This is the only trustworthy "idle" floor: a later format's settle-wait
+# cannot use its own `pre_release_mb` as a reference point, because a
+# *smaller* format following a *larger* one (bnb-nf4's ~1GB footprint right
+# after fp16's ~3GB) would then only be required to settle to half of the
+# larger format's peak -- which is still far above true idle -- contaminating
+# the smaller format's own baseline and silently erasing most of its
+# apparent usage. Confirmed: this is why bnb-nf4 (runs immediately after
+# fp16 in this project's format order) showed an implausible ~64MB peak_vram_mb
+# in the v3 run -- `release_gpu_memory()`'s old `target = pre_release_mb * 0.5`
+# let bnb-nf4's baseline get captured at roughly half of fp16's ~3078MB peak,
+# nowhere near idle, so `peak - baseline` collapsed to a small residual.
+_cold_idle_floor_mb: float | None = None
+
 
 def reset_peak_tracking() -> None:
-    global _vram_poller, _ram_poller, _vram_method
+    global _vram_poller, _ram_poller, _vram_method, _cold_idle_floor_mb
 
     try:
         import torch
@@ -173,6 +188,8 @@ def reset_peak_tracking() -> None:
         pass
 
     baseline = _read_gpu_memory_used_mb()
+    if _cold_idle_floor_mb is None:
+        _cold_idle_floor_mb = baseline
     if baseline is not None:
         _vram_method = "nvidia-smi-poll"
     else:
@@ -254,13 +271,22 @@ def release_gpu_memory() -> None:
         pass
 
     if pre_release_mb is not None:
-        # Expect memory to drop meaningfully; settling to within 5% of the
-        # pre-release level (not necessarily all the way to zero -- a
-        # driver/runtime baseline persists even fully idle) is treated as
-        # "released." If it never drops, warn loudly rather than silently
-        # let the next format's baseline capture a contaminated reading.
-        target = pre_release_mb * 0.5  # expect a real model unload to roughly halve usage at minimum
-        settled = _wait_for_gpu_memory_to_settle(below_mb=max(target, 200.0))
+        # Settle target is the process-wide cold idle floor (captured once,
+        # before the first format ever loaded a model), not a fraction of
+        # this format's own pre-release usage -- a relative target (the old
+        # `pre_release_mb * 0.5`) only requires settling to half of THIS
+        # format's peak, which is still far above idle whenever the next
+        # format is much smaller (e.g. bnb-nf4 following fp16): the next
+        # format's baseline then gets captured already-elevated, silently
+        # erasing most of its own apparent usage. A small absolute margin
+        # (100MB) is added since driver/allocator bookkeeping overhead can
+        # cause the reading to hover a little above the exact cold floor.
+        target = (_cold_idle_floor_mb + 100.0) if _cold_idle_floor_mb is not None else pre_release_mb * 0.5
+        # Timeout raised from the old 10s: the stricter near-idle target
+        # above gives WSL2's GPU paravirtualization layer (already known to
+        # have release-reporting lag -- see module docstring) less slack to
+        # hit by coincidence, so it needs more real time to actually settle.
+        settled = _wait_for_gpu_memory_to_settle(below_mb=max(target, 200.0), timeout_s=20.0)
         if not settled:
             current = _read_gpu_memory_used_mb()
             print(

@@ -13,3 +13,11 @@ where = ["src"]
 
 [project.scripts]
 hf-quant-bench = "hf_quant_bench.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# All tests here are plain functions -- disabling class-based collection
+# avoids a spurious warning from bench/cases.py's TestCase dataclass (a
+# project data type, not a test class) matching pytest's default "Test*"
+# class-name convention.
+python_classes = []

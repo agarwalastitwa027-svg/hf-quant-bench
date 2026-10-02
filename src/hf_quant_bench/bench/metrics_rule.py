@@ -1,13 +1,11 @@
 """Rule-based metrics: tool correctness, argument correctness, hallucination
 rate, path optimization, answer completeness. All five are deterministic and
 hand-rolled (no library, no model of any kind) -- there is no LLM-as-a-judge
-anywhere in the primary metrics. path_optimization and answer_completeness
-replaced an earlier Anthropic-API-based judge entirely: this project's
-author has no cloud LLM API key and isn't getting one, and an approximate
-judge scoring things this harness already knows exactly (the minimal step
-count; the literal values the deterministic mock tools returned) would be
-strictly worse than just computing them. See bench/local_judge.py for the
-optional, off-by-default, offline local-model supplementary scoring.
+anywhere in the primary metrics. An approximate judge scoring things this
+harness already knows exactly (the minimal step count; the literal values
+the deterministic mock tools returned) would be strictly worse than just
+computing them. See bench/local_judge.py for the optional, off-by-default,
+offline local-model supplementary scoring.
 """
 
 from __future__ import annotations

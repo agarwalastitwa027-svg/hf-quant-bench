@@ -63,14 +63,11 @@ onnxruntime>=1.19
 # qai-hub
 
 # --- benchmark harness ---
-# No cloud LLM API client here on purpose: path_optimization and
-# answer_completeness are deterministic, rule-based metrics computed from
-# data this project already has exactly (see bench/metrics_rule.py) -- there
-# is no LLM-as-a-judge in the primary metrics, and no ANTHROPIC_API_KEY or
-# equivalent is ever read. The optional --local-judge flag (off by default)
-# scores a separate, supplementary pair of columns using a local GGUF model
-# through llama-cpp-python, which is already required above for the gguf
-# conversion target -- no new dependency needed for it.
+# No cloud LLM API client here: path_optimization and answer_completeness are
+# deterministic, rule-based metrics (see bench/metrics_rule.py), no
+# LLM-as-a-judge in the primary metrics. The optional --local-judge flag
+# (off by default) scores a supplementary pair of columns via a local GGUF
+# model through llama-cpp-python, already required above for the gguf target.
 psutil>=6.0
 
 # --- dev ---

@@ -12,6 +12,73 @@ fitting inside that box; see "Hardware assumptions" below.
 
 ---
 
+## Results at a glance
+
+- Benchmarked **Qwen2.5-1.5B-Instruct** across **9 local quantization
+  formats** on an RTX 5070, plus a **Qualcomm Snapdragon NPU** compile
+  target, on **100 deterministic, rule-scored test cases** — no
+  LLM-as-a-judge anywhere in the primary metrics.
+- **Headline finding**: GPTQ-4bit and AWQ-4bit's calibration process
+  measurably *hurts* this model's ability to emit a structured tool-call
+  format — GPTQ-4bit's `tool_correctness` collapsed to **~0.29** against
+  **~0.72–0.80** for every uncalibrated format (fp16, bnb, GGUF). Calibration
+  did not help here. Details and caveats in "GPTQ/AWQ calibration finding"
+  below — this is a one-model, one-run result, not a general claim about
+  calibrated quantization.
+- Compiled the same model to a **Qualcomm QNN context binary**: **45.4 ms**
+  median on-device latency on a Snapdragon 8 Elite, with **all 1,659 ops
+  running on the NPU** (zero CPU/GPU fallback).
+- **Caveat**: everything below is a single run, one model, no repeated
+  seeds, no confidence intervals. Treat gaps under ~0.03–0.05 between
+  formats as noise; the gaps I'd actually trust are the large, repeated
+  ones (GPTQ/AWQ's tool-call collapse; the ~4× decode-speed gap between
+  llama.cpp and `transformers`). See "Known weak spots" for the full
+  reliability discussion, including one measurement (`bnb-nf4`'s VRAM
+  figure) I know is currently wrong.
+
+| Format | Tool correct. | Arg correct. | Halluc. rate | Completeness | Peak VRAM (MB) | Decode tok/s |
+|---|---|---|---|---|---|---|
+| fp16 | 0.80 | 0.87 | 0.005 | 0.88 | 3078 | 36.4 |
+| bnb-nf4 | 0.785 | 0.832 | 0.005 | 0.887 | 64 † | 30.2 |
+| bnb-int8 | 0.765 | 0.865 | 0.01 | 0.893 | 1530 | 7.3 |
+| gptq-4bit | 0.29 ‡ | 0.29 ‡ | 0.0 ‡ | 0.0 ‡ | — | — |
+| awq-4bit | 0.67 | 0.69 | 0.01 | 0.613 | 3900 | 33.9 |
+| gguf-Q4_0 | 0.75 | 0.87 | 0.0 | 0.88 | 1340 | 151.8 |
+| gguf-Q4_K_M | 0.78 | 0.87 | 0.015 | 0.86 | 1390 | 125.2 |
+| gguf-Q5_K_M | 0.725 | 0.835 | 0.005 | 0.86 | 1522 | 119.5 |
+| gguf-Q8_0 | 0.74 | 0.85 | 0.025 | 0.847 | 2020 | 111.6 |
+
+† **Known-bad measurement, not a real result.** `bnb-nf4`'s peak-VRAM poll
+got its baseline contaminated by the previous (much larger) format's
+settle-wait threshold — root-caused and fixed in `resource_monitor.py`, but
+not yet re-verified by a fresh GPU run. Do not read 64 MB as this format's
+real footprint. See "Known weak spots."
+
+‡ The gated run this table otherwise reports from (`bench_results_v3_rescored/`)
+correctly **aborts `gptq-4bit` at the 3-case preflight gate**, by design,
+instead of repeating a full 100-case sweep already known to be broken — so
+its row is genuinely all-zero/n=3, not a bug in this table. The `0.29`
+figure shown here is the real, full 100-case result from a separate,
+pre-gate run (`bench_results_calibration_fixed_run/`) that is this project's
+actual evidence for the headline finding. See "GPTQ/AWQ calibration
+finding" below for why these are two different runs telling one consistent
+story, not a contradiction.
+
+Full machine-readable results: [`bench_results_v3_rescored/results.csv`](bench_results_v3_rescored/results.csv) /
+[`results.md`](bench_results_v3_rescored/results.md) (the current, corrected, 9-format sweep) and
+[`bench_results_calibration_fixed_run/results.csv`](bench_results_calibration_fixed_run/results.csv) (the full ungated GPTQ/AWQ run backing the headline finding).
+
+Qualcomm on-device profile (100 runs, real Snapdragon 8 Elite hardware —
+full methodology in "What the `qai-hub` target needed" below):
+
+| Metric | Value |
+| --- | --- |
+| Inference latency (median of 100) | **45.4 ms** (min 43.0, max 48.1) |
+| Peak inference memory | **119.6 MiB** |
+| Compute-unit split | **1659 / 1659 ops on NPU** (zero CPU/GPU fallback) |
+
+---
+
 ## 1. First-run setup (paste these in order, from `~/projects`)
 
 ```bash
@@ -355,7 +422,22 @@ src/hf_quant_bench/
     resource_monitor.py          # VRAM/RAM peak tracking
     report.py                     # results.csv / results.md
     run.py                         # Part 2 CLI
+tests/                    # pytest unit tests for the deterministic scoring/aggregation logic above
+rescore.py                 # read-only re-scoring pass against already-saved trajectory JSONLs (no re-inference)
 ```
+
+Run the test suite with:
+
+```bash
+pytest
+```
+
+It covers `metrics_rule.py`'s scoring functions and `report.py`'s aggregation
+against hand-built fixtures, plus structural checks on `test_cases.yaml`
+itself (no duplicate ids, every case has the fields its metrics depend on).
+It does not touch a model or the GPU — these are pure-Python unit tests of
+the scoring logic, not an end-to-end check (use the `--smoke` sweep above
+for that).
 
 ---
 
@@ -429,15 +511,54 @@ looser alternative I considered (fuzzy string matching, keyword sets)
 reintroduces exactly the non-determinism/"model of some kind" the spec
 explicitly rules out. They are documented, not hidden.
 
+**This is a single run, one model, no repeated seeds, no confidence
+intervals.** Every number above and below comes from one 100-case sweep
+against one model (Qwen2.5-1.5B-Instruct) with greedy/default decoding. I
+have not run multiple seeds or a second model size to check how much of any
+given gap is sampling noise versus a real effect. Treat small gaps (roughly
+under 0.03–0.05 on the 0–1 metrics) between formats as not meaningfully
+different from each other. The gaps I'd actually stand behind are the large,
+repeated ones that show up consistently across multiple metrics and cases:
+GPTQ/AWQ's tool-call-format collapse (a ~0.4-wide gap, not a few points),
+and the engine-level decode-speed gap between llama.cpp and `transformers`
+(~4×, not ~1.1×). If you extend this project, adding a second model size (a
+3B or 7B) or a few repeated seeds would do more to validate the smaller
+format-vs-format gaps than anything else listed here.
+
+**`bnb-nf4`'s `peak_vram_mb` is a known-bad measurement, flagged not
+fixed-and-reverified.** Its reported 64 MB is not believable for a 1.5B
+model under any quantization — root cause found: `release_gpu_memory()`'s
+old settle-wait between formats only required memory to drop to *half* of
+the *previous* format's peak before the next format's baseline was
+captured. `bnb-nf4` runs immediately after `fp16` (~3078 MB peak) in this
+project's format order, so its baseline got captured at roughly 1539 MB —
+nowhere near idle — silently erasing most of `bnb-nf4`'s own usage from the
+`peak - baseline` calculation. Fixed in `resource_monitor.py` by settling
+against a fixed process-wide idle floor (captured once, before the first
+format ever loads) instead of a fraction of the previous format's own peak.
+**This fix is not yet verified by a fresh GPU run** — I found and fixed the
+code bug but did not re-run the sweep to confirm the corrected number,
+since that costs real GPU time; treat every `peak_vram_mb` value in the
+published results as pending re-verification until a fresh run confirms
+the fix, not just `bnb-nf4`'s.
+
 ---
+
+## Detailed findings and bugs found during development
 
 This section reflects an actual completed run against Qwen2.5-1.5B-Instruct
 on an RTX 5070 (Blackwell, sm_120) under WSL2 — 9 formats, 100 test cases
 each, all with real weights and real generation. Not a dry-run projection.
 
-**Formats that work and were fully benchmarked**: fp16, bnb-nf4, bnb-int8,
-gptq-4bit (calibrated on real wikitext2), awq-4bit (calibrated on real
-wikitext2, via the llm-compressor fallback), gguf-Q4_0/Q4_K_M/Q5_K_M/Q8_0.
+**Formats that were fully benchmarked**: fp16, bnb-nf4, bnb-int8,
+awq-4bit (calibrated on real wikitext2, via the llm-compressor fallback),
+gguf-Q4_0/Q4_K_M/Q5_K_M/Q8_0 all completed a full 100-case sweep in the
+current, gated run (`bench_results_v3_rescored/`). **`gptq-4bit` did not**
+in that run — see "GPTQ/AWQ calibration finding" below for why that's the
+gate working as intended rather than a gap in coverage: a separate, earlier,
+ungated 100-case run (`bench_results_calibration_fixed_run/`) did fully
+benchmark `gptq-4bit`, and is what found the quality collapse the gate now
+catches in three cases instead of a hundred.
 
 ### What the `qai-hub` target needed
 
@@ -555,8 +676,8 @@ is not what this target does.
   combination. Do not trust `fp16-kv4`/`fp16-kv2` results without further
   investigation — the code path exists but is not validated as correct.
 
-**The headline finding, and why I trust it**: GPTQ-4bit and AWQ-4bit both
-substantially *underperform* the uncalibrated round-to-nearest formats
+**GPTQ/AWQ calibration finding, and why I trust it**: GPTQ-4bit and AWQ-4bit
+both substantially *underperform* the uncalibrated round-to-nearest formats
 (bnb-nf4, GGUF) on tool-call correctness — GPTQ dropped to ~0.29-0.31,
 AWQ to ~0.67-0.69, against ~0.72-0.80 for every uncalibrated format
 including fp16 itself. I initially suspected this was an artifact of a
@@ -571,9 +692,24 @@ measurably damage this model's ability to comply with a prompted structured
 tool-call format, even though the model's underlying reasoning stays
 coherent (GPTQ's failure mode specifically was narrating "I will call
 get_weather..." in prose instead of emitting `<tool_call>{...}</tool_call>`).
-`results.md`'s "Calibrated vs. uncalibrated quantization" section states this
-comparison for any model you run this against — the specific numbers above
-are for this one model and won't generalize to every architecture.
+
+**These two numbers (0.31 "before", 0.29 "after") are two separate, full
+100-case runs**, published as `bench_results_calibration_bug_run/` (the
+degenerate-synthetic-calibration-data run) and
+`bench_results_calibration_fixed_run/` (the real-wikitext2 run) — the
+latter is this project's actual evidence for the headline finding, since
+it's the one calibrated on real text. **Neither of these is the
+`gptq-4bit` row you'll find in the current `bench_results_v3_rescored/`
+table.** That row comes from a third, later run: after this finding
+motivated building the preflight validation gate (see "Preflight validation
+gate" above), re-running the full sweep with the gate enabled makes
+`gptq-4bit` correctly abort after 3 cases instead of repeating the same
+100-case collapse a third time — which is why that table's `gptq-4bit` row
+is all-zero/n=3 with `PREFLIGHT ABORTED` in `backend_note`, not a
+re-measurement of this finding. `results.md`'s "Calibrated vs. uncalibrated
+quantization" section states this comparison for any model you run this
+against — the specific numbers above are for this one model and won't
+generalize to every architecture.
 
 **Live GPU-driver instability found and fixed**: GPTQ calibration and
 llmcompressor's AWQ path both crashed the entire WSL VM reproducibly during
