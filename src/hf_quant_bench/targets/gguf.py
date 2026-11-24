@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from hf_quant_bench.registry import ConversionContext, ConversionResult, Target, register
@@ -40,7 +41,15 @@ def _find_convert_script(llama_dir: Path) -> Path | None:
 
 
 def _find_quantize_bin(llama_dir: Path) -> Path | None:
-    for candidate in ["build/bin/llama-quantize", "llama-quantize", "build/bin/quantize", "quantize"]:
+    names = ["build/bin/llama-quantize", "llama-quantize", "build/bin/quantize", "quantize"]
+    if os.name == "nt":
+        # Windows: executables end in .exe, and multi-config generators (Visual Studio)
+        # put them under build/bin/Release/.
+        names = [f"{n}.exe" for n in names] + [
+            "build/bin/Release/llama-quantize.exe",
+            "build/bin/Release/quantize.exe",
+        ]
+    for candidate in names:
         p = llama_dir / candidate
         if p.exists() and os.access(p, os.X_OK):
             return p
@@ -76,7 +85,7 @@ def convert(model_id: str, out_dir: Path, ctx: ConversionContext) -> ConversionR
 
     print(f"[gguf] converting '{model_id}' to intermediate f16 GGUF (CPU-only step)")
     cmd = [
-        "python3", str(convert_script),
+        sys.executable, str(convert_script),  # the current venv's Python ("python3" doesn't exist on Windows)
         model_id if Path(model_id).exists() else _resolve_local_snapshot(model_id),
         "--outfile", str(fp16_gguf),
         "--outtype", "f16",

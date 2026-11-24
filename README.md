@@ -149,7 +149,9 @@ export LLAMA_CPP_DIR=$HOME/llama.cpp
 ```
 
 Add the `export LLAMA_CPP_DIR=...` line to `~/.bashrc` so it persists across
-shells. Without it, the `gguf` target is skipped with a clear reason (not a
+shells. On native Windows (no WSL), use `.\scripts\build_llama_cpp.ps1` instead
+(CPU-only MSVC build into `C:\dev\llama.cpp`; needs CMake, Ninja and the Visual
+Studio C++ build tools), then set `LLAMA_CPP_DIR` as it prints. Without it, the `gguf` target is skipped with a clear reason (not a
 crash) — it's independent of every other target.
 
 ### Optional: OpenVINO, for the iGPU/NPU-adjacent target
